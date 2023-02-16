@@ -1,0 +1,14 @@
+__ignore__
+_background_
+Human
+Car
+Truck
+Bus
+Van
+Crashed
+House
+Building
+CrossLight
+Motorcycle
+obstacle
+Tree
