@@ -1,1 +1,1 @@
-from ResnetEncoder import *
+from DCGN import *
