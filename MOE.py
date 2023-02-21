@@ -127,11 +127,8 @@ class MoE(nn.Module):
     def forward(self, x):
         gates, load = self.noisy_top_k_gating(x, self.training)
         # calculate importance loss
-        importance = gates.sum(0)
-
         dispatcher = SparseDispatcher(self.num_experts, gates)
         expert_inputs = dispatcher.dispatch(x)
-        gates = dispatcher.expert_to_gates()
         expert_outputs = [self.experts[i](expert_inputs[i]) for i in range(self.num_experts)]
         y = dispatcher.combine(expert_outputs)
         return y

@@ -3,7 +3,7 @@ import torch.nn as nn
 import math
 import numpy as np
 import torch
-
+import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 from torch.nn.modules.module import Module
 
@@ -145,22 +145,25 @@ class DCGN(nn.Module):
         stdv = 1. / math.sqrt(self.Propagate3.size(1))
         self.Propagate3.data.uniform_(-stdv, stdv)
 
-    def forward(self, x, graph):
+    def forward(self, x, graph,device):
         # 50,1024
         x = self.nodewiseconvolution(x)  # 50,1024
         adj = self.WisePooling(x, graph)  # 50,1024
-        adj = get_adjacent(adj)  # 50,50
+        adj = get_adjacent(adj).to(device)  # 50,50
         x = adj @ x @ self.Propagate1  # 50,256
+        x = F.elu(x)
 
         adj = self.AttentionPooling1(x)# 17,256
         x = self.NodeConvolution1(x)  # 17,256
-        adj = get_adjacent(adj)  # 17,17
+        adj = get_adjacent(adj).to(device)  # 17,17
         x = adj @ x @ self.Propagate2  # 17,64
+        x = F.elu(x)
 
         adj = self.AttentionPooling2(x)  # 6,64
         x = self.NodeConvolution2(x)  # 6,64
-        adj = get_adjacent(adj)  # 6,6
+        adj = get_adjacent(adj).to(device)  # 6,6
         x = adj @ x @ self.Propagate3  # 6,32
+        x = F.elu(x)
 
         x = x.view(-1,192)  # 192
         x = self.MixtureOfExpert(x)
