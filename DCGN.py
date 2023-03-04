@@ -7,8 +7,37 @@ import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 from torch.nn.modules.module import Module
 
-from MOE import MoE
 
+class WisePooling(Module):
+
+    def __init__(self):
+        super(WisePooling, self).__init__()
+
+    def forward(self, input, graph):
+        tensor_list = list()
+        for j in range(graph.shape[0]):
+            shot_boundary = graph[j]
+            tensor_list.append(
+                torch.div(torch.sum(input[shot_boundary[0]:shot_boundary[1] + 1], dim=0).requires_grad_(True),
+                          shot_boundary[1] - shot_boundary[0] + 1).requires_grad_(True) + 6e-3)
+        return torch.stack(tensor_list, dim=0).requires_grad_(True)
+
+
+class WiseConvolution(Module):
+
+    def __init__(self, input_size, output_size):
+        super(WiseConvolution, self).__init__()
+        self.WiseConv = nn.Linear(input_size, output_size)
+
+    def forward(self, input, graph):
+        tensor_list = list()
+        for j in range(graph.shape[0]):
+            shot_boundary = graph[j]
+
+            tensor_list.append(
+                torch.sum(self.WiseConv(input[shot_boundary[0]:shot_boundary[1] + 1]), dim=0).requires_grad_(True))
+
+        return torch.stack(tensor_list, dim=0).requires_grad_(True)
 
 
 class NodeConvolution(Module):
@@ -24,54 +53,30 @@ class NodeConvolution(Module):
         self.weight1.data.uniform_(-stdv, stdv)
 
     def forward(self, input):
-        batch_size = input.shape[0]
-        steps = batch_size // self.pooling_size
-        left_tensor = False
-        if batch_size % self.pooling_size != 0:
-            steps += 1
-            left_tensor = True
+        batch_list = list()
+        for i in range(input.shape[0]):
+            tensor = input[i]
+            batch_size = tensor.shape[0]
+            steps = batch_size // self.pooling_size
+            left_tensor = False
+            if batch_size % self.pooling_size != 0:
+                steps += 1
+                left_tensor = True
+            tensor_list = list()
+            for j in range(steps):
+                if left_tensor is True and j == steps - 1:
+                    tensor_ = torch.zeros(self.pooling_size, tensor.shape[1], requires_grad=True).cuda()
+                    for i in range(batch_size % self.pooling_size):
+                        tensor_[i] = tensor[self.pooling_size * j + i]
+                    tensor_list.append(torch.sum(tensor_ * self.weight1, dim=0).requires_grad_(True))
+                else:
+                    tensor_list.append(
+                        torch.sum(
+                            tensor[self.pooling_size * j + 0:self.pooling_size * j + self.pooling_size] * self.weight1,
+                            dim=0).requires_grad_(True))
+            batch_list.append(torch.stack(tensor_list, dim=0))
 
-        tensor_list = list()
-        for j in range(steps):
-            if left_tensor is True and j == steps - 1:
-                tensor=torch.zeros(self.pooling_size,input.shape[1]).cuda()
-                for i in range(batch_size % self.pooling_size):
-                    tensor[i]=input[self.pooling_size * j + i]
-                tensor_list.append(torch.sum(tensor * self.weight1,dim=0))
-            else:
-                tensor_list.append(torch.sum(input[self.pooling_size * j + 0:self.pooling_size * j + self.pooling_size] * self.weight1,dim=0))
-
-
-        return torch.stack(tensor_list, dim=0)
-
-
-class WisePooling(Module):
-
-    def __init__(self):
-        super(WisePooling, self).__init__()
-
-    def forward(self, input, graph):
-        tensor_list =list()
-        for j in range(graph.shape[0]):
-            shot_boundary = graph[j]
-            tensor_list.append(torch.div(torch.sum(input[shot_boundary[0]:shot_boundary[1] + 1], dim=0),shot_boundary[1] - shot_boundary[0] + 1)+6e-3)
-        return torch.stack(tensor_list, dim=0)
-
-
-class WiseConvolution(Module):
-
-    def __init__(self, input_size, output_size):
-        super(WiseConvolution, self).__init__()
-        self.WiseConv = nn.Linear(input_size, output_size)
-
-    def forward(self, input, graph):
-        tensor_list = list()
-        for j in range(graph.shape[0]):
-            shot_boundary = graph[j]
-
-            tensor_list.append(torch.sum(self.WiseConv(input[shot_boundary[0]:shot_boundary[1] + 1]), dim=0))
-
-        return torch.stack(tensor_list, dim=0)
+        return torch.stack(batch_list, dim=0).requires_grad_(True)
 
 
 class GraphAttentionPooling(Module):
@@ -82,87 +87,112 @@ class GraphAttentionPooling(Module):
         self.W = nn.Linear(in_features, 1, bias=True)
         self.pooling_size = pooling_size
 
-    def forward(self, batch_rep):
-        batch_size = batch_rep.shape[0]
-        steps = batch_size // self.pooling_size
-        left_tensor = False
-        if batch_size % self.pooling_size != 0:
-            steps += 1
-            left_tensor = True
+    def forward(self, batch_tensor):
+        batch_list = list()
+        for i in range(batch_tensor.shape[0]):
+            tensor = batch_tensor[i]
+            batch_size = tensor.shape[0]
+            steps = batch_size // self.pooling_size
+            left_tensor = False
+            if batch_size % self.pooling_size != 0:
+                steps += 1
+                left_tensor = True
 
-        tensor_list = list()
-        for j in range(steps):
-            if left_tensor is True and j == steps - 1:
-                left_size = self.pooling_size - batch_size % self.pooling_size
+            tensor_list = list()
+            for j in range(steps):
+                if left_tensor is True and j == steps - 1:
+                    tensor_ = torch.zeros(self.pooling_size, tensor.shape[1], requires_grad=True).cuda()
+                    for i in range(batch_size % self.pooling_size):
+                        tensor_[i] = tensor[self.pooling_size * j + i]
+                    att_w = F.softmax(self.W(tensor_), dim=0).requires_grad_(True)
+                    tensor_list.append(tensor_.T @ att_w)
+                else:
+                    att_w = F.softmax(
+                        self.W(tensor[self.pooling_size * j + 0:self.pooling_size * j + self.pooling_size]),
+                        dim=0).requires_grad_(True)
+                    tensor_list.append(
+                        tensor[self.pooling_size * j + 0:self.pooling_size * j + self.pooling_size].T @ att_w)
+            batch_list.append(torch.stack(tensor_list, dim=0))
+        return torch.stack(batch_list, dim=0).requires_grad_(True)
 
-                att_w = F.softmax(self.W(
-                    batch_rep[self.pooling_size * j + 0 - left_size: self.pooling_size * j + self.pooling_size - left_size]),dim=0)
-                tensor_list.append(batch_rep[self.pooling_size * j + 0 - left_size: self.pooling_size * j + self.pooling_size - left_size].T @ att_w)
-            else:
-                att_w = F.softmax(
-                    self.W(batch_rep[self.pooling_size * j + 0:self.pooling_size * j + self.pooling_size]), dim=0)
-                tensor_list.append(batch_rep[self.pooling_size * j + 0:self.pooling_size * j + self.pooling_size].T @ att_w)
 
-        return torch.stack(tensor_list, dim=0)
+# v1 1024 256 64 16   4               91 78
+# v2 1024 512 128 32  4              78 75
+# v3 1024 512 256 128 8
+
+class FinalModel(nn.Module):
+    def __init__(self):
+        super(FinalModel, self).__init__()
+        self.feature_extract = nn.Sequential(
+            nn.Conv2d(3, 5, kernel_size=3),
+            nn.GELU(),
+            nn.BatchNorm2d(5),
+            nn.MaxPool2d(3),
+            nn.Dropout(0.6),
+            nn.Conv2d(5, 8, kernel_size=3),
+            nn.GELU(),
+            nn.BatchNorm2d(8),
+            nn.MaxPool2d(3),
+            nn.Dropout(0.6))
+        self.dcgn = DCGN(5832, 13)
+
+    def forward(self, input, device):
+        batch_size = input.shape[0]
+        arrays = list()
+        for i in range(batch_size):
+            arrays.append(self.feature_extract(input[i]))
+
+        x = torch.stack(arrays, dim=0)
+        x = x.view(batch_size, 50, -1)
+        return self.dcgn(x, device)
 
 
 class DCGN(nn.Module):
     def __init__(self, input, nclass, pooling_size=3):
         super(DCGN, self).__init__()
 
-        self.nodewiseconvolution = NodeConvolution(3, input,pooling_size=pooling_size)
+        self.nodewiseconvolution = NodeConvolution(pooling_size, input, pooling_size=pooling_size)
         self.WisePooling = GraphAttentionPooling(input, pooling_size=pooling_size)
-        self.Propagate1 = Parameter(torch.FloatTensor(1024, 1024))
+        self.Propagate1 = Parameter(torch.FloatTensor(input, 216))
 
-        self.NodeConvolution1 = NodeConvolution(3, 1024,pooling_size=pooling_size)
-        self.AttentionPooling1 = GraphAttentionPooling(1024, pooling_size=pooling_size)
-        self.Propagate2 = Parameter(torch.FloatTensor(1024, 512))
-
-        self.NodeConvolution2 = NodeConvolution(3, 512, pooling_size=pooling_size)
-        self.AttentionPooling2 = GraphAttentionPooling(512, pooling_size=pooling_size)
-        self.Propagate3 = Parameter(torch.FloatTensor(512, 256))
+        self.NodeConvolution2 = NodeConvolution(pooling_size, 216, pooling_size=pooling_size)
+        self.AttentionPooling2 = GraphAttentionPooling(216, pooling_size=pooling_size)
+        self.Propagate3 = Parameter(torch.FloatTensor(216, 8))
 
         self.reset_parameters()
-        self.MixtureOfExpert = MoE(256*2, nclass, nclass, hidden_size=64, noisy_gating=True, k=4)
+        self.classifier = nn.Linear(8 * 6, nclass)
 
     def reset_parameters(self):
         stdv = 1. / math.sqrt(self.Propagate1.size(1))
         self.Propagate1.data.uniform_(-stdv, stdv)
 
-        stdv = 1. / math.sqrt(self.Propagate2.size(1))
-        self.Propagate2.data.uniform_(-stdv, stdv)
-
         stdv = 1. / math.sqrt(self.Propagate3.size(1))
         self.Propagate3.data.uniform_(-stdv, stdv)
 
-    def forward(self, x, graph, device):
+    def forward(self, x, device):
 
         adj = self.WisePooling(x)
         x = self.nodewiseconvolution(x)  # 2,256
-          # 2,1024
-        adj = self.get_adjacent(adj).to(device)  # 2,2
-
-        x = adj@x@ self.Propagate1
-        x = F.elu(x)
-
-        adj = self.AttentionPooling1(x)  # 2,64
-        x = self.NodeConvolution1(x)  # 2,64
-        adj = self.get_adjacent(adj).to(device)  # 2,32.
-
-        x = adj @ x @ self.Propagate2
-        x = F.elu(x)
+        adj = self.get_adjacent(adj).to(device).requires_grad_(True)  # 2,2
+        x = self.propagate(adj, x, self.Propagate1)
+        x = F.gelu(x)
 
         adj = self.AttentionPooling2(x)  # 2,64
         x = self.NodeConvolution2(x)  # 2,64
-        adj = self.get_adjacent(adj).to(device)  # 2,32.
+        adj = self.get_adjacent(adj).to(device).requires_grad_(True)  # 2,32.
+        x = self.propagate(adj, x, self.Propagate3)
+        x = F.gelu(x)
 
-        x = adj @ x @ self.Propagate3
-        x = F.elu(x)
-
-        x= x.view(-1,512)
-        x = self.MixtureOfExpert(x)
+        x = x.view(-1, 6*8)
+        x = self.classifier(x)
 
         return x
+
+    def propagate(self, adj, x, propagate):
+        batch_list = list()
+        for i in range(x.shape[0]):
+            batch_list.append(adj[i] @ x[i] @ propagate)
+        return torch.stack(batch_list, dim=0).requires_grad_(True)
 
     def cosine_similarity_adjacent(self, matrix1, matrix2):
         squaresum1 = torch.sum(torch.square(matrix1), dim=1)  # 1024 to 1
@@ -177,19 +207,23 @@ class DCGN(nn.Module):
         return cosine_similarity
 
     def get_adjacent(self, matrix):
-        matrix_frame = matrix.shape[0]  # 4,2,1024
-        AdjacentMatrix = torch.zeros( matrix_frame, matrix_frame)  # 2 X 2
+        batch_list = list()
+        for i in range(matrix.shape[0]):
+            tensor = matrix[i]
+            matrix_frame = tensor.shape[0]  # 4,2,1024
+            AdjacentMatrix = torch.zeros(matrix_frame, matrix_frame)  # 2 X 2
 
-        chunks = torch.chunk(matrix, matrix_frame, dim=0)
-        for i in range(matrix_frame):
-            for j in range(matrix_frame - i):
-                AdjacentMatrix[j][i] = self.cosine_similarity_adjacent(chunks[i], chunks[j])
-                if not i == j:
-                    AdjacentMatrix[j][i] = AdjacentMatrix[i][j]
-        I = torch.eye(AdjacentMatrix.shape[0])
+            chunks = torch.chunk(tensor, matrix_frame, dim=0)
+            for i in range(matrix_frame):
+                for j in range(matrix_frame - i):
+                    AdjacentMatrix[j][i] = self.cosine_similarity_adjacent(chunks[i], chunks[j])
+                    if not i == j:
+                        AdjacentMatrix[j][i] = AdjacentMatrix[i][j]
+            I = torch.eye(AdjacentMatrix.shape[0], requires_grad=True)
 
-        AdjacentMatrix += I
-        D_hat = torch.sum(AdjacentMatrix, dim=0)
-        D_hat = torch.linalg.inv(torch.sqrt(torch.diag(D_hat)))
-
-        return D_hat @ AdjacentMatrix @ D_hat
+            AdjacentMatrix += I
+            AdjacentMatrix = AdjacentMatrix.requires_grad_(True)
+            D_hat = torch.sum(AdjacentMatrix, dim=0)
+            D_hat = torch.linalg.inv(torch.sqrt(torch.diag(D_hat)))
+            batch_list.append(D_hat @ AdjacentMatrix @ D_hat)
+        return torch.stack(batch_list, dim=0).requires_grad_(True)
