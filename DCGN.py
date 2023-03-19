@@ -119,7 +119,7 @@ class GraphAttentionPooling(Module):
 # v1 1024 256 64 16   4               91 78
 # v2 1024 512 128 32  4              78 75
 # v3 1024 512 256 128 8
-
+from lightgbm import LGBMClassifier
 class FinalModel(nn.Module):
     def __init__(self):
         super(FinalModel, self).__init__()
@@ -127,24 +127,64 @@ class FinalModel(nn.Module):
             nn.Conv2d(3, 5, kernel_size=3),
             nn.GELU(),
             nn.BatchNorm2d(5),
-            nn.MaxPool2d(3),
-            nn.Dropout(0.6),
+            nn.Conv2d(5, 5, kernel_size=4, stride=2),
+            nn.GELU(),
+            nn.BatchNorm2d(5),
+            nn.Dropout(0.25),
+
             nn.Conv2d(5, 8, kernel_size=3),
             nn.GELU(),
             nn.BatchNorm2d(8),
-            nn.MaxPool2d(3),
-            nn.Dropout(0.6))
-        self.dcgn = DCGN(5832, 13)
+            nn.Conv2d(8, 8, kernel_size=4, stride=2),
+            nn.GELU(),
+            nn.BatchNorm2d(8),
+            nn.Dropout(0.25),
+
+            nn.Conv2d(8, 12, kernel_size=3),
+            nn.GELU(),
+            nn.BatchNorm2d(12),
+            nn.Conv2d(12, 12, kernel_size=4, stride=2),
+            nn.GELU(),
+            nn.BatchNorm2d(12),
+            nn.Dropout(0.25),
+
+            nn.Conv2d(12, 16, kernel_size=3),
+            nn.GELU(),
+            nn.BatchNorm2d(16),
+            nn.Conv2d(16, 16, kernel_size=4, stride=2),
+            nn.GELU(),
+            nn.BatchNorm2d(16),
+            nn.Dropout(0.4))
+
+        self.dcgn = DCGN(12544, 13)
 
     def forward(self, input, device):
         batch_size = input.shape[0]
         arrays = list()
         for i in range(batch_size):
             arrays.append(self.feature_extract(input[i]))
-
         x = torch.stack(arrays, dim=0)
         x = x.view(batch_size, 50, -1)
         return self.dcgn(x, device)
+
+
+
+class DCGNPropagate(nn.Module):
+    def __init__(self, input, output):
+        super(DCGNPropagate, self).__init__()
+        self.Weight = Parameter(torch.FloatTensor(input, output))
+        self.Bias = Parameter(torch.FloatTensor(output))
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        stdv = 1. / math.sqrt(self.Weight.size(1))
+        self.Weight.data.uniform_(-stdv, stdv)
+
+    def forward(self, adj, x):
+        batch_list = list()
+        for i in range(x.shape[0]):
+            batch_list.append(adj[i] @ x[i] @ self.Weight + self.Bias)
+        return torch.stack(batch_list, dim=0).requires_grad_(True)
 
 
 class DCGN(nn.Module):
@@ -153,46 +193,33 @@ class DCGN(nn.Module):
 
         self.nodewiseconvolution = NodeConvolution(pooling_size, input, pooling_size=pooling_size)
         self.WisePooling = GraphAttentionPooling(input, pooling_size=pooling_size)
-        self.Propagate1 = Parameter(torch.FloatTensor(input, 216))
+        self.Propagate1 = DCGNPropagate(input, 784)
 
-        self.NodeConvolution2 = NodeConvolution(pooling_size, 216, pooling_size=pooling_size)
-        self.AttentionPooling2 = GraphAttentionPooling(216, pooling_size=pooling_size)
-        self.Propagate3 = Parameter(torch.FloatTensor(216, 8))
+        self.NodeConvolution2 = NodeConvolution(pooling_size, 784, pooling_size=pooling_size)
+        self.AttentionPooling2 = GraphAttentionPooling(784, pooling_size=pooling_size)
+        self.Propagate2 = DCGNPropagate(784, 28)
 
-        self.reset_parameters()
-        self.classifier = nn.Linear(8 * 6, nclass)
-
-    def reset_parameters(self):
-        stdv = 1. / math.sqrt(self.Propagate1.size(1))
-        self.Propagate1.data.uniform_(-stdv, stdv)
-
-        stdv = 1. / math.sqrt(self.Propagate3.size(1))
-        self.Propagate3.data.uniform_(-stdv, stdv)
+        self.classifier = nn.Sequential( nn.Linear(6*28,32),
+                                         nn.GELU(),
+                                         nn.Linear(32,nclass))
 
     def forward(self, x, device):
 
         adj = self.WisePooling(x)
         x = self.nodewiseconvolution(x)  # 2,256
         adj = self.get_adjacent(adj).to(device).requires_grad_(True)  # 2,2
-        x = self.propagate(adj, x, self.Propagate1)
+        x = self.Propagate1(adj, x)
         x = F.gelu(x)
 
         adj = self.AttentionPooling2(x)  # 2,64
         x = self.NodeConvolution2(x)  # 2,64
         adj = self.get_adjacent(adj).to(device).requires_grad_(True)  # 2,32.
-        x = self.propagate(adj, x, self.Propagate3)
+        x = self.Propagate2(adj, x)
         x = F.gelu(x)
 
-        x = x.view(-1, 6*8)
+        x = x.view(-1, 6*28)
         x = self.classifier(x)
-
         return x
-
-    def propagate(self, adj, x, propagate):
-        batch_list = list()
-        for i in range(x.shape[0]):
-            batch_list.append(adj[i] @ x[i] @ propagate)
-        return torch.stack(batch_list, dim=0).requires_grad_(True)
 
     def cosine_similarity_adjacent(self, matrix1, matrix2):
         squaresum1 = torch.sum(torch.square(matrix1), dim=1)  # 1024 to 1

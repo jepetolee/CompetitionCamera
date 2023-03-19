@@ -1,20 +1,17 @@
+import random
+
 import pandas as pd
 import numpy as np
 import torch
 import torch.nn as nn
 import DCGN
-import h5py
 import warnings
-import random
-import os
 import cv2
 from tqdm.auto import tqdm
 from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, DataLoader
 from sklearn.metrics import f1_score
 import albumentations as A
-from skimage.util import random_noise
-
 
 def inference(model, test_loader, device):
     model.to(device)
@@ -69,9 +66,9 @@ class CustomDataset(Dataset):
             seed = random.randint(1, 100)
             if self.test is True:
                 func = self.original
-            elif 1 <= seed <= 30:
+            elif 1 <= seed <= 20:
                 func = self.original
-            elif 31 <= seed <= 50:
+            elif 21 <= seed <= 50:
                 func = self.flip
             elif 51 <= seed <= 60:
                 func = self.blur
@@ -114,26 +111,24 @@ def validation(model, criterion, val_loader, device):
     return _val_loss, _val_score
 
 
-def train_model(model, optimizer, device, valid_mod=True):
+def train_model(model, optimizer, device):
     model.to(device)
     criterion = nn.CrossEntropyLoss().to(device)
 
     best_score = 0
-    best_model = None
-    preds, trues = [], []
     df = pd.read_csv('./train.csv')
-
+    train_loss = []
     for epoch in range(1, CFG['EPOCHS'] + 1):
-        train, val, _, _ = train_test_split(df, df['label'], test_size=0.2)
 
-        train_dataset = CustomDataset(train['video_path'].values, train['label'].values, test=False)
+        train, val, _, _ = train_test_split(df, df['label'], test_size=0.4,random_state=random.randint(1,100),shuffle=True)
+
+        train_dataset = CustomDataset(train['video_path'].values, train['label'].values, test=True)
         train_loader = DataLoader(train_dataset, batch_size=CFG['BATCH_SIZE'], shuffle=True, num_workers=0)
 
         val_dataset = CustomDataset(val['video_path'].values, val['label'].values, test=True)
-        val_loader = DataLoader(val_dataset, batch_size=CFG['BATCH_SIZE'], shuffle=False, num_workers=0)
+        val_loader = DataLoader(val_dataset, batch_size=CFG['BATCH_SIZE_VALID'], shuffle=False, num_workers=0)
         model.train()
 
-        train_loss = []
         for videos, labels in tqdm(iter(train_loader)):
             videos = videos.to(device)
 
@@ -146,28 +141,17 @@ def train_model(model, optimizer, device, valid_mod=True):
             optimizer.step()
             train_loss.append(loss.item())
 
-            pred = output.argmax(1)
-
-            preds += pred.detach().cpu().numpy().tolist()
-            trues += labels.detach().cpu().numpy().tolist()
-
         _train_loss = np.mean(train_loss)
-        train_score = f1_score(trues, preds, average='macro')
-        if valid_mod:
-            _val_loss, _val_score = validation(model, criterion, val_loader, device)
-            print(f'Epoch [{epoch}], Train Loss : [{_train_loss:.5f}], Train F1 : [{train_score:.5f}],Val Loss : [{_val_loss:.5f}] Val F1 : [{_val_score:.5f}]')
-            if best_score < _val_score:
-                best_score = _val_score
-                best_model = model
-                torch.save(best_model.state_dict(), './saved.pt')
-        else:
+        train_loss.clear()
+        del train_loader,train_dataset,val_dataset
 
-            print(
-                f'Epoch [{epoch}], Train Loss : [{_train_loss:.5f}] Train F1 : [{train_score:.5f}]')
-            if best_score < train_score:
-                best_score = train_score
-                best_model = model
-                torch.save(best_model.state_dict(), './saved.pt')
+        _val_loss, _val_score = validation(model, criterion, val_loader, device)
+        print(f'Epoch [{epoch}], Train Loss : [{_train_loss:.5f}],Val Loss : [{_val_loss:.5f}] Val F1 : [{_val_score:.5f}]')
+        if best_score < _val_score:
+            best_score = _val_score
+            best_model = model
+            torch.save(best_model.state_dict(), './saved.pt')
+        del val_loader
 
     return best_model
 
@@ -179,10 +163,11 @@ if __name__ == "__main__":
 
     CFG = {
         'VIDEO_LENGTH': 50,
-        'EPOCHS': 40,
-        'IMG_SIZE': 256,
-        'LEARNING_RATE': 0.0002,
-        'BATCH_SIZE': 8
+        'EPOCHS': 100,
+        'IMG_SIZE': 512,
+        'LEARNING_RATE': 1e-4,
+        'BATCH_SIZE': 8,
+        'BATCH_SIZE_VALID': 8
     }
 
     state_dict = torch.load('./saved.pt')
@@ -190,11 +175,10 @@ if __name__ == "__main__":
     model.load_state_dict(state_dict)
     optimizer = torch.optim.RAdam(params=model.parameters(), lr=CFG["LEARNING_RATE"], weight_decay=1e-5)
 
-    infer_model = train_model(model, optimizer, device)  # with valid
-
+    infer_model = train_model(model, optimizer, device)
     test = pd.read_csv('./test.csv')
     test_dataset = CustomDataset(test['video_path'].values, None, test=True)
-    test_loader = DataLoader(test_dataset, batch_size=CFG['BATCH_SIZE'], shuffle=False, num_workers=0)
+    test_loader = DataLoader(test_dataset, batch_size=CFG['BATCH_SIZE_VALID'], shuffle=False, num_workers=0)
 
     preds = inference(model, test_loader, device)
 
